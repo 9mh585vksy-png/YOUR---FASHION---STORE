@@ -1,0 +1,6 @@
+{
+  "name": "YOUR FASHION STORE — Luxury Apparel & Live GPS Delivery",
+  "description": "Shop curated contemporary menswear, womenswear, and accessories with real-time GPS delivery tracking, instant route-based shipping estimates, and secure checkout in ₹.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

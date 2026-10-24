@@ -1,0 +1,318 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 4.1: Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Phase 3: Hardened Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerified() && request.auth.token.email == 'bhattacharyadebargha14@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Validation Blueprints
+    function isValidUserPublic(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'displayName', 'role', 'createdAt']) &&
+        isValidId(data.uid) &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+        data.role is string && (data.role == 'customer' || data.role == 'admin' || data.role == 'delivery_partner') &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidUserPrivate(data) {
+      return data.keys().hasAll(['uid', 'email', 'notifyEmail', 'notifySms', 'notifyWhatsapp', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'phone', 'notifyEmail', 'notifySms', 'notifyWhatsapp', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 20)) &&
+        data.notifyEmail is bool &&
+        data.notifySms is bool &&
+        data.notifyWhatsapp is bool &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'createdAt']) &&
+        isValidId(data.uid) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidProduct(data) {
+      return data.keys().hasAll(['sku', 'name', 'category', 'price', 'published', 'authorUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['sku', 'name', 'category', 'price', 'published', 'authorUid', 'createdAt', 'updatedAt']) &&
+        isValidId(data.sku) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 140 &&
+        data.category is string && data.category.size() >= 1 && data.category.size() <= 60 &&
+        data.price is number && data.price >= 0 && data.price <= 10000000 &&
+        data.published is bool &&
+        isValidId(data.authorUid) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidOrderState(status) {
+      return status is string && (
+        status == 'placed' ||
+        status == 'payment_confirmed' ||
+        status == 'processing' ||
+        status == 'packed' ||
+        status == 'ready_for_dispatch' ||
+        status == 'shipped' ||
+        status == 'out_for_delivery' ||
+        status == 'delivered' ||
+        status == 'cancelled' ||
+        status == 'failed'
+      );
+    }
+
+    function isValidOrderRecord(data) {
+      return data.keys().hasAll(['orderNumber', 'userId', 'assignedPartnerId', 'status', 'totalAmount', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['orderNumber', 'userId', 'assignedPartnerId', 'status', 'totalAmount', 'createdAt', 'updatedAt']) &&
+        isValidId(data.orderNumber) &&
+        isValidId(data.userId) &&
+        isValidId(data.assignedPartnerId) &&
+        isValidOrderState(data.status) &&
+        data.totalAmount is number && data.totalAmount >= 0 && data.totalAmount <= 10000000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidDeliveryLocation(data) {
+      return data.keys().hasAll(['orderId', 'customerId', 'partnerId', 'lat', 'lng', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['orderId', 'customerId', 'partnerId', 'lat', 'lng', 'createdAt', 'updatedAt']) &&
+        isValidId(data.orderId) &&
+        isValidId(data.customerId) &&
+        isValidId(data.partnerId) &&
+        data.lat is number && data.lat >= -90 && data.lat <= 90 &&
+        data.lng is number && data.lng >= -180 && data.lng <= 180 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // Collection 1: /users/{userId}
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+
+      allow create: if isVerified() &&
+        isValidId(userId) &&
+        isOwner(userId) &&
+        isValidUserPublic(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        (incoming().role == 'customer' || isAdmin());
+
+      allow update: if isVerified() &&
+        isValidId(userId) &&
+        isValidUserPublic(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt && (
+          isAdmin() ||
+          (
+            isOwner(userId) &&
+            incoming().role == existing().role &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName'])
+          )
+        );
+
+      allow delete: if isVerified() && isValidId(userId) && isAdmin();
+
+      // Subcollection: /users/{userId}/private/{docId} (PII Split Collection + Master Gate)
+      match /private/{docId} {
+        allow get: if isSignedIn() &&
+          isValidId(userId) &&
+          isValidId(docId) &&
+          (isOwner(userId) || isAdmin()) &&
+          get(/databases/$(database)/documents/users/$(userId)).data.uid == userId;
+
+        allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
+
+        allow create: if isVerified() &&
+          isValidId(userId) &&
+          isValidId(docId) &&
+          isOwner(userId) &&
+          isValidUserPrivate(incoming()) &&
+          incoming().uid == request.auth.uid &&
+          incoming().updatedAt == request.time &&
+          get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+
+        allow update: if isVerified() &&
+          isValidId(userId) &&
+          isValidId(docId) &&
+          isValidUserPrivate(incoming()) &&
+          incoming().uid == existing().uid &&
+          incoming().updatedAt == request.time && (
+            isAdmin() ||
+            (
+              isOwner(userId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['email', 'phone', 'notifyEmail', 'notifySms', 'notifyWhatsapp', 'updatedAt']) &&
+              get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid
+            )
+          );
+
+        allow delete: if isVerified() && isValidId(userId) && isValidId(docId) && isAdmin();
+      }
+    }
+
+    // Collection 2: /admins/{adminId}
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isSignedIn() && isAdmin();
+      allow create: if isVerified() &&
+        isValidId(adminId) &&
+        isValidAdminRecord(incoming()) &&
+        incoming().uid == adminId &&
+        incoming().createdAt == request.time &&
+        isAdmin();
+      allow update: if false;
+      allow delete: if isVerified() && isValidId(adminId) && isAdmin();
+    }
+
+    // Collection 3: /products/{productId}
+    match /products/{productId} {
+      allow get: if isValidId(productId) && (existing().published == true || isAdmin());
+      allow list: if existing().published == true || isAdmin();
+
+      allow create: if isVerified() &&
+        isValidId(productId) &&
+        isValidProduct(incoming()) &&
+        incoming().authorUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+
+      allow update: if isVerified() &&
+        isValidId(productId) &&
+        isValidProduct(incoming()) &&
+        incoming().authorUid == existing().authorUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isAdmin() &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['sku', 'name', 'category', 'price', 'published', 'updatedAt']);
+
+      allow delete: if isVerified() && isValidId(productId) && isAdmin();
+    }
+
+    // Collection 4: /orders/{orderId}
+    match /orders/{orderId} {
+      allow get: if isSignedIn() &&
+        isValidId(orderId) &&
+        (existing().userId == request.auth.uid || existing().assignedPartnerId == request.auth.uid || isAdmin());
+
+      allow list: if isSignedIn() &&
+        (existing().userId == request.auth.uid || existing().assignedPartnerId == request.auth.uid || isAdmin());
+
+      allow create: if isVerified() &&
+        isValidId(orderId) &&
+        isValidOrderRecord(incoming()) &&
+        incoming().userId == request.auth.uid &&
+        incoming().status == 'placed' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/users/$(incoming().userId));
+
+      allow update: if isVerified() &&
+        isValidId(orderId) &&
+        isValidOrderRecord(incoming()) &&
+        incoming().orderNumber == existing().orderNumber &&
+        incoming().userId == existing().userId &&
+        incoming().totalAmount == existing().totalAmount &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            existing().status != 'delivered' &&
+            existing().status != 'cancelled' && (
+              // Action 1: Customer cancels their own placed order
+              (
+                existing().userId == request.auth.uid &&
+                existing().status == 'placed' &&
+                incoming().status == 'cancelled' &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              ) ||
+              // Action 2: Assigned Delivery Partner advances delivery status
+              (
+                existing().assignedPartnerId == request.auth.uid &&
+                (incoming().status == 'out_for_delivery' || incoming().status == 'delivered' || incoming().status == 'failed') &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              )
+            )
+          )
+        );
+
+      allow delete: if isVerified() && isValidId(orderId) && isAdmin();
+    }
+
+    // Collection 5: /delivery_locations/{orderId}
+    match /delivery_locations/{orderId} {
+      allow get: if isSignedIn() &&
+        isValidId(orderId) &&
+        (existing().customerId == request.auth.uid || existing().partnerId == request.auth.uid || isAdmin());
+
+      allow list: if isSignedIn() &&
+        (existing().customerId == request.auth.uid || existing().partnerId == request.auth.uid || isAdmin());
+
+      allow create: if isVerified() &&
+        isValidId(orderId) &&
+        isValidDeliveryLocation(incoming()) &&
+        incoming().orderId == orderId &&
+        incoming().partnerId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/orders/$(orderId)) &&
+        get(/databases/$(database)/documents/orders/$(orderId)).data.assignedPartnerId == request.auth.uid;
+
+      allow update: if isVerified() &&
+        isValidId(orderId) &&
+        isValidDeliveryLocation(incoming()) &&
+        incoming().orderId == existing().orderId &&
+        incoming().customerId == existing().customerId &&
+        incoming().partnerId == existing().partnerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            existing().partnerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['lat', 'lng', 'updatedAt']) &&
+            get(/databases/$(database)/documents/orders/$(orderId)).data.assignedPartnerId == request.auth.uid
+          )
+        );
+
+      allow delete: if isVerified() && isValidId(orderId) && isAdmin();
+    }
+  }
+}
